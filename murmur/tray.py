@@ -12,11 +12,11 @@ log = logging.getLogger(__name__)
 
 
 class Tray:
-    def __init__(self, on_toggle: Callable[[bool], None], on_open_notes: Callable[[], None],
+    def __init__(self, on_toggle: Callable[[bool], None], on_open: Callable[[], None],
                  on_open_folder: Callable[[], None], on_settings: Callable[[], None],
                  on_quit: Callable[[], None]):
         self._on_toggle = on_toggle
-        self._on_open_notes = on_open_notes
+        self._on_open = on_open
         self._on_open_folder = on_open_folder
         self._on_settings = on_settings
         self._on_quit = on_quit
@@ -43,9 +43,9 @@ class Tray:
 
     def _menu(self) -> pystray.Menu:
         return pystray.Menu(
-            pystray.MenuItem("Enabled", self._toggle, checked=lambda item: self._enabled, default=True),
+            pystray.MenuItem("Open Murmur", self._safe(self._on_open), default=True),
+            pystray.MenuItem("Enabled", self._toggle, checked=lambda item: self._enabled),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Open this month's notes", self._safe(self._on_open_notes)),
             pystray.MenuItem("Open notes folder", self._safe(self._on_open_folder)),
             pystray.MenuItem("Settings", self._safe(self._on_settings)),
             pystray.Menu.SEPARATOR,

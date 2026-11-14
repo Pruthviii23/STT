@@ -21,25 +21,20 @@ New-Item -ItemType Directory -Force (Split-Path $ico) | Out-Null
 & $venvPy -c "from murmur.icon import save_ico; save_ico(r'$ico')"
 if ($LASTEXITCODE -ne 0) { throw 'icon generation failed' }
 
-$startup = [Environment]::GetFolderPath('Startup')
-$lnkPath = Join-Path $startup 'Murmur.lnk'
-$shell = New-Object -ComObject WScript.Shell
-$lnk = $shell.CreateShortcut($lnkPath)
-$lnk.TargetPath = Join-Path $repo '.venv\Scripts\pythonw.exe'
-$lnk.Arguments = '-m murmur'
-$lnk.WorkingDirectory = $repo
-$lnk.IconLocation = $ico
-$lnk.Description = 'Murmur - hold-to-talk voice notes'
-$lnk.WindowStyle = 7
-$lnk.Save()
-Write-Host "Startup shortcut: $lnkPath"
+Write-Host 'Creating shortcuts...'
+& $venvPy -m murmur --install-shortcuts
+if ($LASTEXITCODE -ne 0) { throw 'shortcut creation failed' }
 
-# Launch now unless already running (the app also enforces a single instance).
-$running = Get-CimInstance Win32_Process -Filter "Name='pythonw.exe'" |
-    Where-Object { $_.CommandLine -like '*-m murmur*' }
-if (-not $running) {
-    Start-Process -FilePath $lnk.TargetPath -ArgumentList '-m murmur' -WorkingDirectory $repo
-    Write-Host 'Murmur started. Look for the mic icon in the tray (model loads in a few seconds).'
-} else {
-    Write-Host 'Murmur is already running.'
+# If an older Murmur is running, stop it and start the new version in the background.
+$pyw = Join-Path $repo '.venv\Scripts\pythonw.exe'
+$old = @(Get-CimInstance Win32_Process -Filter "Name='pythonw.exe' OR Name='python.exe'" |
+    Where-Object { $_.CommandLine -like '*-m murmur*' -and $_.CommandLine -notlike '*-shortcuts*' -and $_.ProcessId -ne $PID })
+if ($old.Count -gt 0) {
+    Write-Host 'Restarting the running Murmur...'
+    $old | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+    Start-Sleep -Seconds 1
 }
+Start-Process -FilePath $pyw -ArgumentList '-m murmur --background' -WorkingDirectory $repo
+Write-Host 'Murmur is running (tray icon; the model loads in a few seconds).'
+Write-Host ''
+Write-Host 'Pin it: open Start, find Murmur, right-click -> Pin to taskbar.'

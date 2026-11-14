@@ -7,7 +7,7 @@ transcribes the audio locally, tidies the text, appends it to a Markdown file an
 
 | Module | Role |
 |---|---|
-| `__main__.py` | `python -m murmur` entry point; calls `app.main()`. |
+| `__main__.py` | `python -m murmur` entry point; calls `app.main(argv)`; flags `--background`, `--install-shortcuts`, `--uninstall-shortcuts`. |
 | `app.py` | Wiring and lifecycle: logging, single-instance mutex, `App` (hold flow, worker, model load, shutdown), `process_audio()` (audio to cleaned text to note). |
 | `config.py` | `Config` dataclass, JSON load/save at `%APPDATA%\Murmur\config.json`, default notes folder (`Documents\Murmur Notes`, resolved through `SHGetKnownFolderPath`). |
 | `hotkey.py` | `HoldHotkey`: global hook with suppression, tap/hold state machine, key replay via `SendInput`. |
@@ -16,7 +16,9 @@ transcribes the audio locally, tidies the text, appends it to a Markdown file an
 | `postprocess.py` | `rule_clean()` (fillers, repeats, spoken commands, punctuation, capitalisation) and optional `llm_clean()` via Ollama with output guards; `clean()` combines them. |
 | `storage.py` | `append_note()`: append-only monthly Markdown file, `fsync`ed. |
 | `popup.py` | `Popup`: borderless, non-activating, always-on-top Tk card (listening / processing / result / message). |
-| `tray.py` | `Tray`: pystray icon and menu. |
+| `tray.py` | `Tray`: pystray icon and menu (Open Murmur is the default/left-click action). |
+| `notes_window.py` | `NotesWindow`: the notes viewer (Tk Toplevel on the main thread); `show()` / `notify_changed()` are thread-safe. |
+| `winapp.py` | Windows integration: AppUserModelID, single-instance mutex, show-window event, shortcut creation (IShellLinkW + IPropertyStore via ctypes). |
 | `sounds.py` | In-memory sine-tone cues played async through `winsound`. |
 | `icon.py` | PIL drawing of the tray icon and the `.ico` used by the installer. |
 
@@ -83,6 +85,8 @@ supports environment variables (`%VAR%`).
 
 ## Process-level details
 
-- Single instance via the named mutex `Local\MurmurVoiceNotes`; a second launch exits immediately.
+- App identity: `SetCurrentProcessExplicitAppUserModelID("Murmur.VoiceNotes")` at process start, before any window. The Start Menu and Startup shortcuts carry the same `System.AppUserModel.ID`, so a pinned taskbar icon and the running window merge into one button and show Murmur's icon.
+- Single instance via the named mutex `Local\MurmurVoiceNotes`. A second launch signals the auto-reset event `Local\MurmurVoiceNotes.Show` (unless `--background`) and exits 0; the running instance waits on that event in a daemon thread (`murmur-activate`) and calls `NotesWindow.show()`. Default launch shows the window on first start; `--background` does not. Env var `MURMUR_INSTANCE` is appended to both names so tests can run an isolated instance.
+- Saving a note calls `NotesWindow.notify_changed()` so the open window refreshes.
 - Logging: rotating file `%APPDATA%\Murmur\murmur.log` (1 MB x 4), plus stderr when attached to a console.
 - Shutdown (tray Quit): stop hotkey, tray and recorder, signal the worker, quit the Tk loop.

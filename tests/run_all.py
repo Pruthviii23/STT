@@ -8,7 +8,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
-SUITES = ["test_hotkey_logic.py", "test_postprocess.py", "test_storage.py"]
+SUITES = ["test_hotkey_logic.py", "test_postprocess.py", "test_storage.py", "test_notes.py"]
 
 
 def main() -> int:

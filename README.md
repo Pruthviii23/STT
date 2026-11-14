@@ -16,9 +16,21 @@ Everything runs on your machine from a tray icon.
 powershell -ExecutionPolicy Bypass -File scripts\install.ps1
 ```
 
-This creates `.venv`, installs the requirements, generates the icon, adds a Startup shortcut so Murmur
-starts with Windows, and launches it. The first start downloads the Whisper model. The tray tooltip reads
-"loading model..." and then "ready". To run with a visible console for debugging, use `scripts\run_console.ps1`.
+This creates `.venv`, installs the requirements, adds a Startup shortcut (starts silently to the tray at
+login) and a Start Menu shortcut, and starts Murmur. If an older Murmur is running it is restarted. The
+first start downloads the Whisper model; the tray tooltip reads "loading model..." and then "ready".
+To run with a visible console for debugging, use `scriptsun_console.ps1`.
+
+**Pin it to the taskbar:** open Start, find Murmur, right-click, Pin to taskbar. (Windows does not allow
+apps to pin themselves.) Clicking the pinned icon opens the notes window; the running window and the
+pinned icon share one taskbar button.
+
+## The window
+
+Launching Murmur (Start Menu, pinned icon, or `python -m murmur`) shows the notes window. If Murmur is
+already running, the launch just asks the running copy to show its window and exits. Closing the window
+leaves Murmur running in the tray. `python -m murmur --background` starts silently with no window (this is
+what the Startup shortcut uses). Left-clicking the tray icon also opens the window.
 
 ## Usage
 
@@ -68,7 +80,7 @@ Files are append-only.
 
 ## Tray menu
 
-Enabled (toggle), Open this month's notes, Open notes folder, Settings, Quit.
+Open Murmur (default, left click), Enabled (toggle), Open notes folder, Settings, Quit.
 
 ## Troubleshooting
 
@@ -79,7 +91,7 @@ Enabled (toggle), Open this month's notes, Open notes folder, Settings, Quit.
 - **Slow transcription:** without a usable CUDA setup Murmur runs on CPU. For an NVIDIA GPU, install the
   CUDA libraries into the venv: `.venv\Scripts\python -m pip install nvidia-cublas-cu12 nvidia-cudnn-cu12`
   (their DLL folders may also need to be on `PATH`). Murmur falls back to CPU automatically if CUDA fails.
-- **Nothing happens:** another copy may already be running (Murmur allows one instance); check the log.
+- **Nothing happens:** another copy may already be running (Murmur allows one instance; launching again opens its window); check the log.
 - **No grammar polish:** Ollama is not running or the model is missing; only the rule-based cleanup is used.
 - **Log:** `%APPDATA%\Murmur\murmur.log`
 
@@ -89,7 +101,7 @@ Enabled (toggle), Open this month's notes, Open notes folder, Settings, Quit.
 powershell -ExecutionPolicy Bypass -File scripts\uninstall.ps1
 ```
 
-Removes the Startup shortcut and stops running instances. Notes and `%APPDATA%\Murmur` are kept.
+Removes the Startup and Start Menu shortcuts and stops running instances. Notes and `%APPDATA%\Murmur` are kept.
 
 ## Tests
 

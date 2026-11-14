@@ -15,14 +15,9 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
-from . import config, postprocess, sounds, storage
+from . import config, postprocess, sounds, storage, winapp
 
 log = logging.getLogger("murmur.app")
-
-MUTEX_NAME = "Local\\MurmurVoiceNotes"
-ERROR_ALREADY_EXISTS = 183
-_mutex_handle = None
-
 
 def setup_logging() -> None:
     config.APP_DIR.mkdir(parents=True, exist_ok=True)
@@ -37,14 +32,6 @@ def setup_logging() -> None:
         sh = logging.StreamHandler()
         sh.setFormatter(fmt)
         root.addHandler(sh)
-
-
-def acquire_single_instance() -> bool:
-    global _mutex_handle
-    k32 = ctypes.windll.kernel32
-    k32.CreateMutexW.restype = ctypes.c_void_p
-    _mutex_handle = k32.CreateMutexW(None, False, MUTEX_NAME)
-    return k32.GetLastError() != ERROR_ALREADY_EXISTS
 
 
 def process_audio(audio, cfg, transcriber, when: datetime | None = None):
@@ -62,12 +49,20 @@ def process_audio(audio, cfg, transcriber, when: datetime | None = None):
     return text, path
 
 
-def _ensure_month_file(cfg) -> Path:
-    path = storage.today_file(cfg.notes_dir)
-    if not path.exists():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(f"# Notes — {datetime.now():%B %Y}\n", encoding="utf-8")
-    return path
+def _ensure_ico() -> Path | None:
+    """Path to the app icon: the repo asset, else one generated into the app data folder."""
+    repo_ico = Path(__file__).resolve().parent.parent / "assets" / "murmur.ico"
+    if repo_ico.exists():
+        return repo_ico
+    try:
+        from .icon import save_ico
+        ico = config.APP_DIR / "murmur.ico"
+        if not ico.exists():
+            save_ico(ico)
+        return ico
+    except Exception:
+        log.exception("Could not create icon")
+        return None
 
 
 def _guard(fn):
@@ -80,7 +75,7 @@ def _guard(fn):
 
 
 class App:
-    def __init__(self, cfg):
+    def __init__(self, cfg, show_on_start: bool = True):
         import tkinter as tk
         from .hotkey import HoldHotkey
         from .popup import Popup
@@ -89,9 +84,17 @@ class App:
         from .tray import Tray
 
         self.cfg = cfg
+        self.show_on_start = show_on_start
         self.root = tk.Tk()
         self.root.withdraw()
         self.popup = Popup(self.root)
+        self.notes_window = None
+        try:
+            from .notes_window import NotesWindow
+            self.notes_window = NotesWindow(self.root, lambda: self.cfg.notes_dir, self._open_folder)
+            self.notes_window.set_icon(_ensure_ico())
+        except Exception:
+            log.exception("Notes window unavailable")
         self.recorder = Recorder(on_level=self.popup.set_level)
         self.transcriber = Transcriber(cfg.whisper_model, cfg.whisper_device, cfg.whisper_compute,
                                        cfg.language)
@@ -103,7 +106,7 @@ class App:
         self._active_sid = 0           # 0 = no active session
         self._start_time: dict[int, datetime] = {}
         self._max_timer: threading.Timer | None = None
-        self.tray = Tray(on_toggle=_guard(self._on_toggle), on_open_notes=_guard(self._open_notes),
+        self.tray = Tray(on_toggle=_guard(self._on_toggle), on_open=_guard(self.show_window),
                          on_open_folder=_guard(self._open_folder), on_settings=_guard(self._open_settings),
                          on_quit=_guard(self.quit_flag.set))
         self.hotkey = HoldHotkey(cfg.hotkey, cfg.hold_ms, on_hold_start=_guard(self._hold_start),
@@ -114,8 +117,9 @@ class App:
         self.hotkey.enabled = enabled
         log.info("Enabled = %s", enabled)
 
-    def _open_notes(self) -> None:
-        os.startfile(str(_ensure_month_file(self.cfg)))
+    def show_window(self) -> None:
+        if self.notes_window is not None:
+            self.notes_window.show()
 
     def _open_folder(self) -> None:
         self.cfg.notes_dir.mkdir(parents=True, exist_ok=True)
@@ -193,6 +197,8 @@ class App:
                 self.model_ready.wait()
                 text, _ = process_audio(audio, self.cfg, self.transcriber, when)
                 if text:
+                    if self.notes_window is not None:
+                        self.notes_window.notify_changed()
                     self.popup.show_result(text, when, self.cfg.popup_seconds)
                 else:
                     self.popup.show_message("Didn't catch that", "No speech detected.")
@@ -249,15 +255,33 @@ class App:
         threading.Thread(target=self._load_model, name="murmur-model", daemon=True).start()
         self.tray.start()
         self.hotkey.start()
+        winapp.start_show_listener(self.show_window)
+        if self.show_on_start:
+            self.root.after(300, self.show_window)
         self.root.after(200, self._poll)
         log.info("Murmur started (hotkey %r, notes in %s)", self.cfg.hotkey, self.cfg.notes_dir)
         self.root.mainloop()
 
 
-def main() -> int:
+def main(argv=None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if "--install-shortcuts" in argv or "--uninstall-shortcuts" in argv:
+        if "--install-shortcuts" in argv:
+            for p in winapp.install_shortcuts():
+                print("Created", p)
+        else:
+            for p in winapp.uninstall_shortcuts():
+                print("Removed", p)
+        return 0
+    background = "--background" in argv
+    winapp.set_app_id()
     setup_logging()
-    if not acquire_single_instance():
-        log.info("Another Murmur instance is already running; exiting")
+    if not winapp.acquire_single_instance():
+        if background:
+            log.info("Another Murmur instance is already running; exiting (background)")
+        else:
+            log.info("Another Murmur instance is running; asking it to show the window")
+            winapp.signal_show()
         return 0
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(2)
@@ -266,7 +290,7 @@ def main() -> int:
     sys.excepthook = lambda t, v, tb: log.error("Uncaught", exc_info=(t, v, tb))
     try:
         cfg = config.load_config()
-        App(cfg).run()
+        App(cfg, show_on_start=not background).run()
     except Exception:
         log.exception("Fatal error")
         return 1

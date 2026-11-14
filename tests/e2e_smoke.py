@@ -1,6 +1,6 @@
 """End-to-end smoke test. Run: .venv\\Scripts\\python tests\\e2e_smoke.py
 
-Part 1: launches `python -m murmur` with a temp APPDATA, simulates a '/' hold + a quick tap via
+Part 1: launches `python -m murmur --background` (MURMUR_INSTANCE=e2e) with a temp APPDATA, simulates a '/' hold + a quick tap via
 SendInput and checks the log. Part 2: TTS WAV -> app.process_audio -> note in a temp dir.
 Warning: part 1 installs a real global keyboard hook in the subprocess for a few seconds.
 """
@@ -41,8 +41,8 @@ def part1(tmp: Path) -> None:
     (appdata / "Murmur" / "config.json").write_text(
         json.dumps({"notes_dir": str(notes), "llm_cleanup": False, "sound_cues": False}), encoding="utf-8")
     log = appdata / "Murmur" / "murmur.log"
-    env = dict(os.environ, APPDATA=str(appdata))
-    proc = subprocess.Popen([str(PY), "-m", "murmur"], cwd=ROOT, env=env)
+    env = dict(os.environ, APPDATA=str(appdata), MURMUR_INSTANCE="e2e")
+    proc = subprocess.Popen([str(PY), "-m", "murmur", "--background"], cwd=ROOT, env=env)
     try:
         assert wait_for(log, "Model ready", 90), "model never became ready"
         time.sleep(1.0)
