@@ -101,8 +101,8 @@ class Popup:
         self.root.after(15, self._pump)
 
     # ---------------- public, thread-safe ----------------
-    def show_listening(self) -> None:
-        self._q.put(self._do_listening)
+    def show_listening(self, title: str = "Listening…") -> None:
+        self._q.put(lambda: self._do_listening(title))
 
     def set_level(self, level: float) -> None:
         try:
@@ -110,11 +110,12 @@ class Popup:
         except Exception:
             pass
 
-    def show_processing(self) -> None:
-        self._q.put(self._do_processing)
+    def show_processing(self, title: str = "Transcribing") -> None:
+        self._q.put(lambda: self._do_processing(title))
 
-    def show_result(self, text: str, when: datetime, seconds: float = 4.0) -> None:
-        self._q.put(lambda: self._do_result(text, when, seconds))
+    def show_result(self, text: str, when: datetime, seconds: float = 4.0,
+                    tag: str = "✓ Saved to notes") -> None:
+        self._q.put(lambda: self._do_result(text, when, seconds, tag))
 
     def show_message(self, title: str, body: str, seconds: float = 3.0) -> None:
         self._q.put(lambda: self._do_message(title, body, seconds))
@@ -311,7 +312,7 @@ class Popup:
     def _row_y(self) -> float:
         return PAD * self.s + 12 * self.s  # centre of the 24px header row
 
-    def _do_listening(self) -> None:
+    def _do_listening(self, title: str = "Listening…") -> None:
         s = self.s
         self._begin("listening", (PAD + 24 + 12 + 30 + PAD) * s)
         self._t0 = time.perf_counter()
@@ -321,7 +322,7 @@ class Popup:
         self._dyn["halo"] = cv.create_oval(0, 0, 0, 0, fill=BG, outline="")
         cv.create_oval(PAD * s + 4 * s, cy - 5 * s, PAD * s + 14 * s, cy + 5 * s, fill=RED, outline="")
         self._dot_c = (PAD * s + 9 * s, cy)
-        cv.create_text((PAD + 26) * s, cy, text="Listening…", anchor="w", fill=FG, font=self.f_title)
+        cv.create_text((PAD + 26) * s, cy, text=title, anchor="w", fill=FG, font=self.f_title)
         self._dyn["time"] = cv.create_text((W - PAD) * s, cy, text="00:00", anchor="e", fill=MUTED,
                                            font=self.f_time)
         bw = 8 * s
@@ -361,7 +362,7 @@ class Popup:
             cv.coords(item, x, by - h / 2 + bw / 2, x, by + h / 2 - bw / 2)
             cv.itemconfigure(item, fill=_mix("#3a3d4a", ACCENT, 0.35 + 0.65 * min(1.0, cur * 1.6)))
 
-    def _do_processing(self) -> None:
+    def _do_processing(self, title: str = "Transcribing") -> None:
         s = self.s
         self._begin("processing", (PAD * 2 + 24) * s)
         self._t0 = time.perf_counter()
@@ -374,8 +375,8 @@ class Popup:
             x, y = cx + R * math.cos(a), cy + R * math.sin(a)
             self._dyn["spin"].append(cv.create_oval(x - 1.8 * s, y - 1.8 * s, x + 1.8 * s, y + 1.8 * s,
                                                     fill=ACCENT, outline=""))
-        cv.create_text((PAD + 26) * s, cy, text="Transcribing", anchor="w", fill=FG, font=self.f_title)
-        tw = self.f_title.measure("Transcribing")
+        cv.create_text((PAD + 26) * s, cy, text=title, anchor="w", fill=FG, font=self.f_title)
+        tw = self.f_title.measure(title)
         self._dyn["dots"] = cv.create_text((PAD + 26) * s + tw + 1 * s, cy, text="", anchor="w",
                                            fill=MUTED, font=self.f_title)
         self._tick_processing()
@@ -391,7 +392,7 @@ class Popup:
             self.cv.itemconfigure(item, fill=_mix(BG, ACCENT, max(0.12, 1 - d / 5.5)))
         self.cv.itemconfigure(self._dyn["dots"], text="." * (int(t * 2.5) % 4))
 
-    def _do_result(self, text: str, when: datetime, seconds: float) -> None:
+    def _do_result(self, text: str, when: datetime, seconds: float, tag: str = "✓ Saved to notes") -> None:
         s = self.s
         text = (text or "").strip() or "(nothing heard)"
         maxw = int((W - 2 * PAD) * s)
@@ -404,7 +405,7 @@ class Popup:
         stamp = f"{when.strftime('%a')} {when.day} {when.strftime('%b')} · {when.strftime('%H:%M')}"
         y0 = PAD * s + head_h / 2
         cv.create_text(PAD * s, y0, text=stamp, anchor="w", fill=MUTED, font=self.f_small)
-        cv.create_text((W - PAD) * s, y0, text="✓ Saved to notes", anchor="e", fill=ACCENT, font=self.f_small)
+        cv.create_text((W - PAD) * s, y0, text=tag, anchor="e", fill=ACCENT, font=self.f_small)
         y = PAD * s + head_h + 10 * s
         for ln in lines:
             cv.create_text(PAD * s, y, text=ln, anchor="nw", fill=FG, font=self.f_body)

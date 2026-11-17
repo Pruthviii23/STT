@@ -1,12 +1,14 @@
-"""Hold-to-talk global hotkey (default: "/").
+"""Hold-to-talk global hotkeys (default: "/" for notes; more keys can map to other modes).
 
 Design notes
-- One global ``keyboard.hook(suppress=True)``. The callback does only short, non-blocking
-  work under a lock and returns True at once for anything it does not own.
-- Slash down (no Shift/Ctrl/Alt/Win) is suppressed and starts a hold timer.
-  Tap (up before hold_ms) -> a worker thread injects '/' down+up.
+- One global ``keyboard.hook(suppress=True)`` serves every hold key. The callback does only
+  short, non-blocking work under a lock and returns True at once for anything it does not own.
+- ``keys`` maps a key name to a mode string; the mode is passed to on_hold_start / on_hold_end.
+  Keys are matched by (non-keypad) scan code. Only one key can be pending/holding at a time.
+- Hold-key down (no Shift/Ctrl/Alt/Win) is suppressed and starts a hold timer.
+  Tap (up before hold_ms) -> a worker thread injects that key's down+up.
   Another key down while pending -> that key is ALSO suppressed and the worker injects
-  '/' tap followed by that key's press, so order is preserved deterministically.
+  the hold key's tap followed by that key's press, so order is preserved deterministically.
   While the worker still has injections outstanding ("busy"), every further key event
   is suppressed and queued behind them, so later events (e.g. the key-up) can never
   overtake the replay.
@@ -15,11 +17,13 @@ Design notes
 - on_hold_start / on_hold_end run on one dedicated callback thread, strictly serialised and
   paired (end is only run if start ran).
 - Watchdog: while holding, a thread caps a hold at MAX_HOLD_S.
+- ``paused()`` lets every event through (used while Murmur itself types text).
 - Limitation: a non-elevated process does not see keys destined for elevated windows.
 """
 from __future__ import annotations
 
 import collections
+import contextlib
 import ctypes
 import logging
 import queue
@@ -32,6 +36,7 @@ import keyboard
 log = logging.getLogger(__name__)
 
 SLASH_SCAN = 53
+_KNOWN_SCANS = {"/": 53, "`": 41, "m": 50}
 MAX_HOLD_S = 600.0
 _EXPECT_TTL = 1.0
 
@@ -73,14 +78,39 @@ def _send_scan(scan: int, up: bool, ext: bool = False) -> None:
     ctypes.windll.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT))
 
 
+def scan_for(key: str) -> int | None:
+    """Main-keyboard scan code for a key name ("/", "`", "m", "f8", ...), or None."""
+    key = (key or "").strip().lower()
+    if not key:
+        return None
+    if key in _KNOWN_SCANS:
+        return _KNOWN_SCANS[key]
+    try:
+        codes = [c for c in keyboard.key_to_scan_codes(key) if c < 0x100]
+        return codes[0] if codes else None
+    except Exception:
+        log.warning("Unknown hotkey %r", key)
+        return None
+
+
 IDLE, PENDING, HOLDING = "idle", "pending", "holding"
 
 
 class HoldHotkey:
-    def __init__(self, key: str = "/", hold_ms: int = 350,
-                 on_hold_start: Callable[[], None] = lambda: None,
-                 on_hold_end: Callable[[], None] = lambda: None):
-        self.key = key
+    def __init__(self, keys: dict[str, str] | str = "/", hold_ms: int = 350,
+                 on_hold_start: Callable[[str], None] = lambda mode: None,
+                 on_hold_end: Callable[[str], None] = lambda mode: None):
+        if isinstance(keys, str):
+            keys = {keys: "note"}
+        self.keys: dict[int, str] = {}           # scan code -> mode
+        for name, mode in keys.items():
+            sc = scan_for(name)
+            if sc is None:
+                continue
+            if sc in self.keys:
+                log.warning("Hotkey %r for %s clashes with %s; ignored", name, mode, self.keys[sc])
+                continue
+            self.keys[sc] = mode
         self.hold_ms = hold_ms
         self.on_hold_start = on_hold_start
         self.on_hold_end = on_hold_end
@@ -96,7 +126,10 @@ class HoldHotkey:
         self._running = False
         self._hold_started_at = 0.0
         self._hold_id = 0
-        self._swallow_up = False   # physical '/' key-up still owed after a tap was replayed early
+        self._active_scan = 0      # hold key that is pending / holding
+        self._active_mode = ""
+        self._swallow_up: set[int] = set()   # physical hold-key ups still owed after an early replay
+        self._paused = 0
 
     # ---------------------------------------------------------------- public
     def start(self) -> None:
@@ -130,18 +163,27 @@ class HoldHotkey:
                 self._cb_q.put("end")
             elif self._state == PENDING:
                 self._busy += 1
-                self._inject_q.put(("tap",))   # don't lose a pending '/'
+                self._inject_q.put(("tap", self._active_scan))   # don't lose a pending key
             self._state = IDLE
         self._inject_q.put(None)
         self._cb_q.put(None)
 
+    @contextlib.contextmanager
+    def paused(self):
+        """Pass every key event through while active (Murmur typing text itself)."""
+        with self._lock:
+            self._paused += 1
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._paused -= 1
+
     # ------------------------------------------------------------ hook thread
-    def _is_slash(self, e) -> bool:
+    def _hot_mode(self, e) -> str | None:
         if getattr(e, "is_keypad", False):
-            return False
-        if self.key == "/":
-            return e.name == "/" or e.scan_code == SLASH_SCAN
-        return e.name == self.key
+            return None
+        return self.keys.get(e.scan_code)
 
     @staticmethod
     def _mods_down() -> bool:
@@ -173,33 +215,36 @@ class HoldHotkey:
                 exp.popleft()
                 return True
 
-            if not self.enabled or not self._running:
+            if not self.enabled or not self._running or self._paused:
                 return True
 
-            slash = self._is_slash(e)
+            mode = self._hot_mode(e)
+            scan = e.scan_code
             st = self._state
+            is_active = mode is not None and st != IDLE and scan == self._active_scan
 
-            # 1b. physical '/' release after we already replayed it (another key interrupted):
+            # 1b. physical hold-key release after we already replayed it (another key interrupted):
             # the replay included an up, so swallow this one (no stray key-up).
-            if slash and not is_down and self._swallow_up:
-                self._swallow_up = False
+            if mode is not None and not is_down and scan in self._swallow_up:
+                self._swallow_up.discard(scan)
                 return False
 
             # 2. replay backlog in progress: keep strict ordering
             if self._busy:
-                if slash and st != IDLE:
+                if is_active:
                     return False
-                self._enqueue_locked([("key", e.scan_code, e.event_type, _is_ext(e))])
+                self._enqueue_locked([("key", scan, e.event_type, _is_ext(e))])
                 return False
 
-            if slash:
+            if mode is not None and (st == IDLE or is_active):
                 if is_down:
                     if st != IDLE:
                         return False            # auto-repeat
-                    self._swallow_up = False
+                    self._swallow_up.discard(scan)
                     if self._mods_down():
                         return True
                     self._state = PENDING
+                    self._active_scan, self._active_mode = scan, mode
                     self._timer = threading.Timer(self.hold_ms / 1000.0, self._timer_fired)
                     self._timer.daemon = True
                     self._timer.start()
@@ -207,7 +252,7 @@ class HoldHotkey:
                 if st == PENDING:
                     self._timer.cancel()
                     self._state = IDLE
-                    self._enqueue_locked([("tap",)])
+                    self._enqueue_locked([("tap", scan)])
                     return False
                 if st == HOLDING:
                     self._end_hold_locked()
@@ -217,8 +262,8 @@ class HoldHotkey:
             if st == PENDING and is_down:
                 self._timer.cancel()
                 self._state = IDLE
-                self._swallow_up = True
-                self._enqueue_locked([("tap",), ("key", e.scan_code, "down", _is_ext(e))])
+                self._swallow_up.add(self._active_scan)
+                self._enqueue_locked([("tap", self._active_scan), ("key", scan, "down", _is_ext(e))])
                 return False
             return True
 
@@ -231,7 +276,7 @@ class HoldHotkey:
             self._hold_started_at = time.monotonic()
             self._hold_id += 1
             hid = self._hold_id
-            self._cb_q.put("start")
+            self._cb_q.put(("start", self._active_mode))
         threading.Thread(target=self._watchdog, args=(hid,), name="murmur-watchdog", daemon=True).start()
 
     def _end_hold_locked(self) -> None:
@@ -270,8 +315,8 @@ class HoldHotkey:
                 return
             try:
                 if it[0] == "tap":
-                    self._send(SLASH_SCAN, "down")
-                    self._send(SLASH_SCAN, "up")
+                    self._send(it[1], "down")
+                    self._send(it[1], "up")
                 else:
                     self._send(it[1], it[2], it[3])
             except Exception:
@@ -281,23 +326,23 @@ class HoldHotkey:
                     self._busy -= 1
 
     def _cb_loop(self, q: queue.Queue) -> None:
-        started = False
+        started = None          # mode of the running hold
         while True:
             it = q.get()
             if it is None:
-                if started:
-                    self._safe(self.on_hold_end)
+                if started is not None:
+                    self._safe(self.on_hold_end, started)
                 return
-            if it == "start":
-                started = True
-                self._safe(self.on_hold_start)
-            elif it == "end" and started:
-                started = False
-                self._safe(self.on_hold_end)
+            if isinstance(it, tuple) and it[0] == "start":
+                started = it[1]
+                self._safe(self.on_hold_start, started)
+            elif it == "end" and started is not None:
+                mode, started = started, None
+                self._safe(self.on_hold_end, mode)
 
     @staticmethod
-    def _safe(fn) -> None:
+    def _safe(fn, *args) -> None:
         try:
-            fn()
+            fn(*args)
         except Exception:
             log.exception("hotkey callback failed")
