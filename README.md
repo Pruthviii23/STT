@@ -39,6 +39,16 @@ what the Startup shortcut uses). Left-clicking the tray icon also opens the wind
 - A quick tap of `/` still types `/`; `Shift+/`, `Ctrl+/` and other combinations are untouched.
 - Spoken commands: "new line" starts a new line; "bullet point" (or "next bullet") starts a bullet.
 
+### Dictate into any app
+
+- Hold `` ` `` (backtick, the key left of `1`), speak, release. The text is typed wherever your cursor
+  is: a text box, an email, a chat message, a document.
+- If no text field has focus (e.g. you're on the desktop), nothing is typed: the text is shown in the
+  popup and copied to the clipboard so you can paste it yourself.
+- Dictated text is not saved to your notes. Line breaks are typed as Shift+Enter, so chat apps add a new
+  line instead of sending.
+- A quick tap of `` ` `` still types `` ` ``.
+
 ## Where notes go
 
 `Documents\Murmur Notes\YYYY-MM.md`: one file per month, a heading per day, one bullet per note.
@@ -62,7 +72,8 @@ Files are append-only.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `hotkey` | `/` | Key to hold |
+| `hotkey` | `/` | Key to hold for a note |
+| `dictate_hotkey` | `` ` `` | Key to hold to dictate into the focused field (`""` disables) |
 | `hold_ms` | `350` | Hold time before recording starts |
 | `notes_dir` | `Documents\Murmur Notes` | Where notes are written |
 | `whisper_model` | `small.en` | faster-whisper model (e.g. `base.en`, `medium.en`) |

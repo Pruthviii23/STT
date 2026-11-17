@@ -10,7 +10,8 @@ transcribes the audio locally, tidies the text, appends it to a Markdown file an
 | `__main__.py` | `python -m murmur` entry point; calls `app.main(argv)`; flags `--background`, `--install-shortcuts`, `--uninstall-shortcuts`. |
 | `app.py` | Wiring and lifecycle: logging, single-instance mutex, `App` (hold flow, worker, model load, shutdown), `process_audio()` (audio to cleaned text to note). |
 | `config.py` | `Config` dataclass, JSON load/save at `%APPDATA%\Murmur\config.json`, default notes folder (`Documents\Murmur Notes`, resolved through `SHGetKnownFolderPath`). |
-| `hotkey.py` | `HoldHotkey`: global hook with suppression, tap/hold state machine, key replay via `SendInput`. |
+| `hotkey.py` | `HoldHotkey`: one global hook with suppression serving several hold keys (key -> mode), tap/hold state machine, key replay via `SendInput`, `paused()` while Murmur types. |
+| `inserter.py` | `focused_text_input()` (system caret, then UI Automation via raw COM), `type_text()` (`SendInput` Unicode, newline = Shift+Enter), `copy_to_clipboard()`. |
 | `recorder.py` | `Recorder`: `sounddevice` input stream at the device's native rate, resampled to 16 kHz on stop; per-block level callback. |
 | `transcriber.py` | `Transcriber`: faster-whisper wrapper; CUDA float16 then CPU int8 fallback; filters known Whisper hallucinations on silence. |
 | `postprocess.py` | `rule_clean()` (fillers, repeats, spoken commands, punctuation, capitalisation) and optional `llm_clean()` via Ollama with output guards; `clean()` combines them. |
@@ -65,8 +66,19 @@ States: `IDLE`, `PENDING` (key down, waiting to learn tap vs hold), `HOLDING`.
 - **Disabled:** when `enabled` is False (tray toggle) every event passes through.
 - **Stop:** unhooks; a HOLDING state delivers `end`, a PENDING state types the pending `/`.
 
-`/` is matched by name or by scan code 53 on the main block (keypad `/` is ignored). A non-elevated
-process does not receive key events destined for elevated windows.
+Each hold key is matched by its main-block scan code (`/` 53, `` ` `` 41; keypad keys are ignored) and
+maps to a mode passed to `on_hold_start(mode)` / `on_hold_end(mode)`. Only one hold key is active at a
+time; another hold key pressed while one is PENDING is treated like any other interrupting key. A
+non-elevated process does not receive key events destined for elevated windows.
+
+## Modes
+
+- **note** (`hotkey`): cleaned text is appended to the notes file and shown in the popup.
+- **dictate** (`dictate_hotkey`): cleaned text is not saved. When the job finishes, `inserter.focused_text_input()`
+  checks the foreground window: desktop/taskbar -> no; the focused thread owns a system caret -> yes;
+  otherwise UI Automation's focused element must be an Edit or have a writable ValuePattern. If yes, the
+  text is typed with `SendInput` while the hook is `paused()`; if no, it is shown in the popup and copied to
+  the clipboard.
 
 ## Notes format (`storage.py`)
 
@@ -77,7 +89,7 @@ flushed with `fsync`.
 
 ## Config keys (`config.py`)
 
-`hotkey`, `hold_ms`, `notes_dir`, `whisper_model`, `whisper_device`, `whisper_compute`, `language`,
+`hotkey`, `dictate_hotkey`, `hold_ms`, `notes_dir`, `whisper_model`, `whisper_device`, `whisper_compute`, `language`,
 `llm_cleanup`, `ollama_url`, `ollama_model`, `llm_timeout_s`, `popup_seconds`, `min_record_s`,
 `max_record_s`, `sound_cues`. Defaults and meanings are in the README table. Unknown keys are ignored,
 missing keys take defaults, and the file is rewritten with every key on each start. `notes_dir`

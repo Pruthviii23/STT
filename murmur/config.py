@@ -53,6 +53,7 @@ def _default_notes_dir() -> Path:
 @dataclass
 class Config:
     hotkey: str = "/"
+    dictate_hotkey: str = "`"
     hold_ms: int = 350
     notes_dir: Path = field(default_factory=_default_notes_dir)
     whisper_model: str = "small.en"

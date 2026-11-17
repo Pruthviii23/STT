@@ -1,4 +1,7 @@
-"""Murmur application wiring: hotkey -> recorder -> transcriber -> postprocess -> storage -> popup.
+"""Murmur application wiring: hotkey -> recorder -> transcriber -> postprocess -> storage / inserter -> popup.
+
+Modes (one per hold key): "note" saves to the notes file; "dictate" types the text into the focused
+text field, or shows it in the popup and copies it to the clipboard when no field is focused.
 
 Threads: Tk main loop on the main thread; hotkey callbacks on the hotkey's callback thread; one
 worker thread does transcription; tray callbacks on the tray thread. Nothing blocks a hotkey callback.
@@ -34,15 +37,20 @@ def setup_logging() -> None:
         root.addHandler(sh)
 
 
-def process_audio(audio, cfg, transcriber, when: datetime | None = None):
-    """audio -> (cleaned_text, note_path). Returns ("", None) when no speech was detected."""
-    when = when or datetime.now()
+def transcribe_clean(audio, cfg, transcriber) -> str:
+    """audio -> cleaned text ("" when no speech was detected)."""
     raw = transcriber.transcribe(audio)
     log.info("Transcribed raw: %r", raw)
     if not raw or not raw.strip():
-        return "", None
-    text = postprocess.clean(raw, cfg)
-    if not text.strip():
+        return ""
+    return postprocess.clean(raw, cfg).strip()
+
+
+def process_audio(audio, cfg, transcriber, when: datetime | None = None):
+    """audio -> (cleaned_text, note_path). Returns ("", None) when no speech was detected."""
+    when = when or datetime.now()
+    text = transcribe_clean(audio, cfg, transcriber)
+    if not text:
         return "", None
     path = storage.append_note(text, cfg.notes_dir, when=when)
     log.info("Note saved to %s", path)
@@ -105,11 +113,15 @@ class App:
         self._sid = 0
         self._active_sid = 0           # 0 = no active session
         self._start_time: dict[int, datetime] = {}
+        self._mode: dict[int, str] = {}
         self._max_timer: threading.Timer | None = None
         self.tray = Tray(on_toggle=_guard(self._on_toggle), on_open=_guard(self.show_window),
                          on_open_folder=_guard(self._open_folder), on_settings=_guard(self._open_settings),
                          on_quit=_guard(self.quit_flag.set))
-        self.hotkey = HoldHotkey(cfg.hotkey, cfg.hold_ms, on_hold_start=_guard(self._hold_start),
+        keys = {cfg.hotkey: "note"}
+        if cfg.dictate_hotkey:
+            keys[cfg.dictate_hotkey] = "dictate"
+        self.hotkey = HoldHotkey(keys, cfg.hold_ms, on_hold_start=_guard(self._hold_start),
                                  on_hold_end=_guard(self._hold_end))
 
     # ---------------------------------------------------------------- tray
@@ -129,15 +141,17 @@ class App:
         os.startfile(str(config.CONFIG_PATH))
 
     # ---------------------------------------------------------------- hold flow
-    def _hold_start(self) -> None:
+    _LISTEN_TITLE = {"note": "Listening…", "dictate": "Dictating…"}
+
+    def _hold_start(self, mode: str = "note") -> None:
         from .recorder import RecorderError
         with self._lock:
             self._sid += 1
             sid = self._sid
-        log.info("Hold start (session %d)", sid)
+        log.info("Hold start (session %d, mode %s)", sid, mode)
         if self.cfg.sound_cues:
             sounds.cue_start()
-        self.popup.show_listening()
+        self.popup.show_listening(self._LISTEN_TITLE.get(mode, "Listening…"))
         try:
             self.recorder.start()
         except RecorderError as e:
@@ -149,6 +163,7 @@ class App:
         with self._lock:
             self._active_sid = sid
             self._start_time[sid] = datetime.now()
+            self._mode[sid] = mode
             t = threading.Timer(float(self.cfg.max_record_s), self._auto_stop, args=(sid,))
             t.daemon = True
             self._max_timer = t
@@ -159,7 +174,7 @@ class App:
         log.warning("max_record_s reached; auto-stopping session %d", sid)
         _guard(self._finish)(sid)
 
-    def _hold_end(self) -> None:
+    def _hold_end(self, mode: str = "note") -> None:
         with self._lock:
             sid = self._active_sid
         if sid:
@@ -174,6 +189,7 @@ class App:
                 self._max_timer.cancel()
                 self._max_timer = None
             when = self._start_time.pop(sid, datetime.now())
+            mode = self._mode.pop(sid, "note")
         audio = self.recorder.stop()
         dur = len(audio) / 16000.0
         log.info("Recording stopped: %.2fs of audio (session %d)", dur, sid)
@@ -184,7 +200,7 @@ class App:
             self.popup.hide()
             return
         self.popup.show_processing()
-        self.jobs.put((audio, when))
+        self.jobs.put((audio, when, mode))
 
     # ---------------------------------------------------------------- worker
     def _worker(self) -> None:
@@ -192,9 +208,12 @@ class App:
             job = self.jobs.get()
             if job is None:
                 return
-            audio, when = job
+            audio, when, mode = job
             try:
                 self.model_ready.wait()
+                if mode != "note":
+                    self._deliver(mode, transcribe_clean(audio, self.cfg, self.transcriber), when)
+                    continue
                 text, _ = process_audio(audio, self.cfg, self.transcriber, when)
                 if text:
                     if self.notes_window is not None:
@@ -208,6 +227,24 @@ class App:
                 if self.cfg.sound_cues:
                     sounds.cue_error()
                 self.popup.show_message("Something went wrong", str(e)[:200], 4.0)
+
+    def _deliver(self, mode: str, text: str, when: datetime) -> None:
+        """Dictation: type into the focused field, else show in the popup + copy to clipboard."""
+        from . import inserter
+        if not text:
+            self.popup.show_message("Didn't catch that", "No speech detected.")
+            log.info("Empty transcription (%s)", mode)
+            return
+        if inserter.focused_text_input():
+            with self.hotkey.paused():
+                inserter.type_text(text)
+            log.info("Typed %d chars into focused field (%s)", len(text), mode)
+            self.popup.show_result(text, when, min(2.0, self.cfg.popup_seconds), tag="✓ Typed")
+            return
+        copied = inserter.copy_to_clipboard(text)
+        log.info("No text field focused; shown in popup (copied=%s)", copied)
+        self.popup.show_result(text, when, max(6.0, self.cfg.popup_seconds),
+                               tag="No text field · copied" if copied else "No text field")
 
     def _load_model(self) -> None:
         self.tray.set_status("Murmur — loading model…")
