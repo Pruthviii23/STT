@@ -66,7 +66,7 @@ States: `IDLE`, `PENDING` (key down, waiting to learn tap vs hold), `HOLDING`.
 - **Disabled:** when `enabled` is False (tray toggle) every event passes through.
 - **Stop:** unhooks; a HOLDING state delivers `end`, a PENDING state types the pending `/`.
 
-Each hold key is matched by its main-block scan code (`/` 53, `` ` `` 41; keypad keys are ignored) and
+Each hold key is matched by its main-block scan code (`/` 53, `` ` `` 41, `m` 50; keypad keys are ignored) and
 maps to a mode passed to `on_hold_start(mode)` / `on_hold_end(mode)`. Only one hold key is active at a
 time; another hold key pressed while one is PENDING is treated like any other interrupting key. A
 non-elevated process does not receive key events destined for elevated windows.
@@ -79,6 +79,11 @@ non-elevated process does not receive key events destined for elevated windows.
   otherwise UI Automation's focused element must be an Edit or have a writable ValuePattern. If yes, the
   text is typed with `SendInput` while the hook is `paused()`; if no, it is shown in the popup and copied to
   the clipboard.
+- **formal** (`formal_hotkey`): like dictate, but the transcript goes through `postprocess.formal()`:
+  `rule_clean()` then an Ollama rewrite (`formal_model`, else `ollama_model`) into a professional tone.
+  Guards reject empty, preamble or overlong output and strip bullets the speaker did not dictate; on
+  failure the rule-cleaned text is typed and the popup says the rewrite was unavailable. The hold start
+  pre-warms the formal model so it loads while the user speaks.
 
 ## Notes format (`storage.py`)
 
@@ -89,8 +94,8 @@ flushed with `fsync`.
 
 ## Config keys (`config.py`)
 
-`hotkey`, `dictate_hotkey`, `hold_ms`, `notes_dir`, `whisper_model`, `whisper_device`, `whisper_compute`, `language`,
-`llm_cleanup`, `ollama_url`, `ollama_model`, `llm_timeout_s`, `popup_seconds`, `min_record_s`,
+`hotkey`, `dictate_hotkey`, `formal_hotkey`, `hold_ms`, `notes_dir`, `whisper_model`, `whisper_device`, `whisper_compute`, `language`,
+`llm_cleanup`, `ollama_url`, `ollama_model`, `llm_timeout_s`, `formal_model`, `formal_timeout_s`, `popup_seconds`, `min_record_s`,
 `max_record_s`, `sound_cues`. Defaults and meanings are in the README table. Unknown keys are ignored,
 missing keys take defaults, and the file is rewritten with every key on each start. `notes_dir`
 supports environment variables (`%VAR%`).

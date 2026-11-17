@@ -66,6 +66,41 @@ def test_llm_guards():
         requests.post = orig
 
 
+def test_formal_guards():
+    import requests
+    orig = requests.post
+
+    class R:
+        def __init__(self, t): self.t = t
+        def raise_for_status(self): pass
+        def json(self): return {"response": self.t}
+
+    text = "Can you send me the slides from yesterday."
+    try:
+        for resp, want in [("Could you please send me the slides from yesterday?",
+                            "Could you please send me the slides from yesterday?"),
+                           ('"Could you please send the slides?"', "Could you please send the slides?"),
+                           ("Rewritten message: Could you send the slides?", "Could you send the slides?"),
+                           ("• Could you please send the slides?", "Could you please send the slides?"),
+                           ("Sure! Here is the rewritten message: ...", None),
+                           ("", None), ("x" * 400, None)]:
+            requests.post = lambda *a, _r=resp, **k: R(_r)
+            got = pp.formalize(text, "http://x", "m", 1)
+            assert got == want, (resp, got)
+        # bullets the speaker dictated are kept
+        requests.post = lambda *a, **k: R("Agenda:\n- Budget\n- Hiring")
+        assert pp.formalize("Agenda\n- budget\n- hiring", "http://x", "m", 1) == "Agenda:\n- Budget\n- Hiring"
+    finally:
+        requests.post = orig
+
+
+def test_formal_fallback():
+    cfg = types.SimpleNamespace(ollama_url="http://127.0.0.1:1", ollama_model="m", formal_model="",
+                                formal_timeout_s=0.5)
+    assert pp.formal("um can you send me the slides", cfg) == ("Can you send me the slides.", False)
+    assert pp.formal("  ", cfg) == ("", False)
+
+
 def test_clean_threshold():
     cfg = types.SimpleNamespace(llm_cleanup=True, ollama_url="http://127.0.0.1:1",
                                 ollama_model="m", llm_timeout_s=0.5)

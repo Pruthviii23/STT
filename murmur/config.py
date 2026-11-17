@@ -54,6 +54,7 @@ def _default_notes_dir() -> Path:
 class Config:
     hotkey: str = "/"
     dictate_hotkey: str = "`"
+    formal_hotkey: str = "m"
     hold_ms: int = 350
     notes_dir: Path = field(default_factory=_default_notes_dir)
     whisper_model: str = "small.en"
@@ -64,6 +65,8 @@ class Config:
     ollama_url: str = "http://127.0.0.1:11434"
     ollama_model: str = "llama3.2"
     llm_timeout_s: float = 8.0
+    formal_model: str = ""          # Ollama model for formal mode; "" = ollama_model
+    formal_timeout_s: float = 45.0
     popup_seconds: float = 4.0
     min_record_s: float = 0.4
     max_record_s: float = 300

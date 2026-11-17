@@ -121,6 +121,8 @@ class App:
         keys = {cfg.hotkey: "note"}
         if cfg.dictate_hotkey:
             keys[cfg.dictate_hotkey] = "dictate"
+        if cfg.formal_hotkey:
+            keys[cfg.formal_hotkey] = "formal"
         self.hotkey = HoldHotkey(keys, cfg.hold_ms, on_hold_start=_guard(self._hold_start),
                                  on_hold_end=_guard(self._hold_end))
 
@@ -141,7 +143,8 @@ class App:
         os.startfile(str(config.CONFIG_PATH))
 
     # ---------------------------------------------------------------- hold flow
-    _LISTEN_TITLE = {"note": "Listening…", "dictate": "Dictating…"}
+    _LISTEN_TITLE = {"note": "Listening…", "dictate": "Dictating…", "formal": "Dictating (formal)…"}
+    _PROCESS_TITLE = {"formal": "Writing formally"}
 
     def _hold_start(self, mode: str = "note") -> None:
         from .recorder import RecorderError
@@ -152,6 +155,9 @@ class App:
         if self.cfg.sound_cues:
             sounds.cue_start()
         self.popup.show_listening(self._LISTEN_TITLE.get(mode, "Listening…"))
+        if mode == "formal":     # load the formal model while the user is still speaking
+            threading.Thread(target=self._prewarm_ollama, args=(self.cfg.formal_model or None,),
+                             name="murmur-prewarm", daemon=True).start()
         try:
             self.recorder.start()
         except RecorderError as e:
@@ -199,7 +205,7 @@ class App:
             log.info("Too short; ignoring")
             self.popup.hide()
             return
-        self.popup.show_processing()
+        self.popup.show_processing(self._PROCESS_TITLE.get(mode, "Transcribing"))
         self.jobs.put((audio, when, mode))
 
     # ---------------------------------------------------------------- worker
@@ -211,6 +217,13 @@ class App:
             audio, when, mode = job
             try:
                 self.model_ready.wait()
+                if mode == "formal":
+                    raw = self.transcriber.transcribe(audio)
+                    log.info("Transcribed raw: %r", raw)
+                    text, rewritten = postprocess.formal(raw or "", self.cfg)
+                    log.info("Formal rewrite %s: %r", "ok" if rewritten else "unavailable", text)
+                    self._deliver(mode, text, when, rewritten)
+                    continue
                 if mode != "note":
                     self._deliver(mode, transcribe_clean(audio, self.cfg, self.transcriber), when)
                     continue
@@ -228,23 +241,28 @@ class App:
                     sounds.cue_error()
                 self.popup.show_message("Something went wrong", str(e)[:200], 4.0)
 
-    def _deliver(self, mode: str, text: str, when: datetime) -> None:
-        """Dictation: type into the focused field, else show in the popup + copy to clipboard."""
+    def _deliver(self, mode: str, text: str, when: datetime, rewritten: bool = True) -> None:
+        """Dictation: type into the focused field, else show in the popup + copy to clipboard.
+
+        rewritten=False (formal mode only) means the LLM was unavailable and the plain text is used.
+        """
         from . import inserter
         if not text:
             self.popup.show_message("Didn't catch that", "No speech detected.")
             log.info("Empty transcription (%s)", mode)
             return
+        note = "" if rewritten else " (not formal: Ollama unavailable)"
         if inserter.focused_text_input():
             with self.hotkey.paused():
                 inserter.type_text(text)
             log.info("Typed %d chars into focused field (%s)", len(text), mode)
-            self.popup.show_result(text, when, min(2.0, self.cfg.popup_seconds), tag="✓ Typed")
+            self.popup.show_result(text, when, min(2.0, self.cfg.popup_seconds) if rewritten else 5.0,
+                                   tag="✓ Typed" + note)
             return
         copied = inserter.copy_to_clipboard(text)
         log.info("No text field focused; shown in popup (copied=%s)", copied)
         self.popup.show_result(text, when, max(6.0, self.cfg.popup_seconds),
-                               tag="No text field · copied" if copied else "No text field")
+                               tag=("No text field · copied" if copied else "No text field") + note)
 
     def _load_model(self) -> None:
         self.tray.set_status("Murmur — loading model…")
@@ -260,11 +278,11 @@ class App:
         if self.cfg.llm_cleanup:
             self._prewarm_ollama()
 
-    def _prewarm_ollama(self) -> None:
+    def _prewarm_ollama(self, model: str | None = None) -> None:
         try:
             import requests
             requests.post(self.cfg.ollama_url.rstrip("/") + "/api/generate",
-                          json={"model": self.cfg.ollama_model, "prompt": "ok", "stream": False,
+                          json={"model": model or self.cfg.ollama_model, "prompt": "ok", "stream": False,
                                 "keep_alive": "30m", "think": False, "options": {"num_predict": 1}},
                           timeout=30)
             log.info("Ollama pre-warmed")
